@@ -1,6 +1,5 @@
 const express = require('express');
 const WebSocket = require('ws');
-const Anthropic = require('@anthropic-ai/sdk');
 const https = require('https');
 const http = require('http');
 
@@ -8,123 +7,212 @@ const app = express();
 app.use(express.urlencoded({ extended: false }));
 app.use(express.json());
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const PORT = process.env.PORT || 3000;
 
-const SYSTEM_PROMPT = 'Eres Sofia, una agente inmobiliaria amigable que habla espanol mexicano. Llamas porque te interesa la propiedad en Santa Fe. Eres calida, natural y conversacional. Usa frases cortas. Pregunta sobre precio, metros, recamaras y disponibilidad. Maximo 2-3 oraciones por respuesta.';
+const SYSTEM_PROMPT = 'Eres Sofia, una agente inmobiliaria amigable que habla espanol mexicano. Llamas para preguntar sobre una propiedad en Santa Fe. Haz preguntas sobre precio, metros cuadrados, recamaras y disponibilidad. Responde de forma natural y breve, maximo 2 oraciones por respuesta.';
 
 app.post('/voice', (req, res) => {
-  const host = req.headers.host;
-  res.type('text/xml');
-  res.send('<?xml version="1.0" encoding="UTF-8"?><Response><Say language="es-MX" voice="Polly.Lupe">Hola, un momento por favor.</Say><Connect><Stream url="wss://' + host + '/media-stream" /></Connect></Response>');
+    const host = req.headers.host;
+    res.type('text/xml');
+    res.send(`<?xml version="1.0" encoding="UTF-8"?><Response><Say language="es-MX" voice="Polly.Lupe">Hola, buenos dias. Le llamo de parte de una inmobiliaria. Tenemos interes en su propiedad en Santa Fe.</Say><Connect><Stream url="wss://${host}/stream" /></Connect></Response>`);
 });
 
 app.get('/', (req, res) => res.send('Agente IA Sofia activo'));
 
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ server, path: '/media-stream' });
+const wss = new WebSocket.Server({ server, path: '/stream' });
 
-wss.on('connection', (twilioWs) => {
-  console.log('Llamada conectada');
-  let streamSid = null;
-  let conversationHistory = [];
-  let deepgramWs = null;
-  let isSpeaking = false;
+wss.on('connection', (ws) => {
+    console.log('Nueva llamada conectada');
+    let conversationHistory = [];
+    let streamSid = null;
+    let dgSocket = null;
+    let isProcessing = false;
+    let silenceTimer = null;
+    let audioBuffer = '';
 
-  function connectDeepgram() {
-    deepgramWs = new WebSocket(
-      'wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&language=es&punctuate=true&interim_results=false&endpointing=500',
-      { headers: { Authorization: 'Token ' + DEEPGRAM_API_KEY } }
-    );
-    deepgramWs.on('open', () => console.log('Deepgram conectado'));
-    deepgramWs.on('message', async (data) => {
-      const result = JSON.parse(data.toString());
-      const transcript = result?.channel?.alternatives?.[0]?.transcript;
-      if (transcript && transcript.trim() && result.is_final) {
-        console.log('Cliente:', transcript);
-        await processMessage(transcript);
-      }
-    });
-    deepgramWs.on('error', (e) => console.error('Deepgram error:', e));
-  }
+         function connectDeepgramSTT() {
+               const dgSTT = new WebSocket(
+                       'wss://api.deepgram.com/v1/listen?encoding=mulaw&sample_rate=8000&language=es&punctuate=true&interim_results=false&endpointing=500',
+                 { headers: { Authorization: `Token ${DEEPGRAM_API_KEY}` } }
+                     );
 
-  async function processMessage(text) {
-    if (isSpeaking) return;
-    isSpeaking = true;
-    conversationHistory.push({ role: 'user', content: text });
-    try {
-      const response = await anthropic.messages.create({
-        model: 'claude-3-5-haiku-20241022',
-        max_tokens: 150,
-        system: SYSTEM_PROMPT,
-        messages: conversationHistory,
+      dgSTT.on('open', () => console.log('Deepgram STT conectado'));
+
+      dgSTT.on('message', async (data) => {
+              try {
+                        const result = JSON.parse(data);
+                        const transcript = result?.channel?.alternatives?.[0]?.transcript;
+                        if (transcript && transcript.trim() && result.is_final) {
+                                    console.log('Cliente dijo:', transcript);
+                                    if (!isProcessing) {
+                                                  isProcessing = true;
+                                                  await generateAndSendResponse(transcript);
+                                                  isProcessing = false;
+                                    }
+                        }
+              } catch (e) {
+                        console.error('Error STT:', e.message);
+              }
       });
-      const reply = response.content[0].text;
-      conversationHistory.push({ role: 'assistant', content: reply });
-      console.log('Sofia:', reply);
-      await speakText(reply);
-    } catch (e) {
-      console.error('Error Claude:', e);
-    }
-    isSpeaking = false;
-  }
 
-  async function speakText(text) {
-    return new Promise((resolve, reject) => {
-      const postData = JSON.stringify({ text });
-      const options = {
-        hostname: 'api.deepgram.com',
-        path: '/v1/speak?model=aura-2-diana-es&encoding=mulaw&sample_rate=8000',
-        method: 'POST',
-        headers: {
-          Authorization: 'Token ' + DEEPGRAM_API_KEY,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(postData),
-        },
-      };
-      const req = https.request(options, (res) => {
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => {
-          const audio = Buffer.concat(chunks).toString('base64');
-          const size = 320;
-          for (let i = 0; i < audio.length; i += size) {
-            if (twilioWs.readyState === WebSocket.OPEN) {
-              twilioWs.send(JSON.stringify({ event: 'media', streamSid, media: { payload: audio.substring(i, i + size) } }));
-            }
-          }
-          resolve();
-        });
-        res.on('error', reject);
-      });
-      req.on('error', reject);
-      req.write(postData);
-      req.end();
-    });
-  }
+      dgSTT.on('error', (e) => console.error('Error Deepgram:', e.message));
+               dgSTT.on('close', () => console.log('Deepgram STT cerrado'));
 
-  async function greet() {
-    const g = 'Hola buenos dias, con quien tengo el gusto? Le llamo porque me intereso mucho su propiedad en Santa Fe.';
-    await speakText(g);
-    conversationHistory.push({ role: 'assistant', content: g });
-    isSpeaking = false;
-  }
+      return dgSTT;
+         }
 
-  twilioWs.on('message', (message) => {
-    const data = JSON.parse(message);
-    if (data.event === 'start') {
-      streamSid = data.start.streamSid;
-      connectDeepgram();
-      setTimeout(greet, 1000);
-    } else if (data.event === 'media' && deepgramWs?.readyState === WebSocket.OPEN) {
-      deepgramWs.send(Buffer.from(data.media.payload, 'base64'));
-    } else if (data.event === 'stop') {
-      deepgramWs?.close();
-    }
-  });
+         async function callGroq(messages) {
+               return new Promise((resolve, reject) => {
+                       const body = JSON.stringify({
+                                 model: 'llama-3.3-70b-versatile',
+                                 messages: messages,
+                                 max_tokens: 150,
+                                 temperature: 0.7
+                       });
 
-  twilioWs.on('close', () => deepgramWs?.close());
+                                        const options = {
+                                                  hostname: 'api.groq.com',
+                                                  path: '/openai/v1/chat/completions',
+                                                  method: 'POST',
+                                                  headers: {
+                                                              'Authorization': `Bearer ${GROQ_API_KEY}`,
+                                                              'Content-Type': 'application/json',
+                                                              'Content-Length': Buffer.byteLength(body)
+                                                  }
+                                        };
+
+                                        const req = https.request(options, (res) => {
+                                                  let data = '';
+                                                  res.on('data', chunk => data += chunk);
+                                                  res.on('end', () => {
+                                                              try {
+                                                                            const parsed = JSON.parse(data);
+                                                                            if (parsed.error) {
+                                                                                            reject(new Error(parsed.error.message));
+                                                                            } else {
+                                                                                            resolve(parsed.choices[0].message.content);
+                                                                            }
+                                                              } catch (e) {
+                                                                            reject(e);
+                                                              }
+                                                  });
+                                        });
+
+                                        req.on('error', reject);
+                       req.write(body);
+                       req.end();
+               });
+         }
+
+         async function textToSpeech(text) {
+               return new Promise((resolve, reject) => {
+                       const body = JSON.stringify({
+                                 text: text,
+                                 model: 'aura-2-thalia-es',
+                                 encoding: 'mulaw',
+                                 sample_rate: 8000,
+                                 container: 'none'
+                       });
+
+                                        const options = {
+                                                  hostname: 'api.deepgram.com',
+                                                  path: '/v1/speak',
+                                                  method: 'POST',
+                                                  headers: {
+                                                              'Authorization': `Token ${DEEPGRAM_API_KEY}`,
+                                                              'Content-Type': 'application/json',
+                                                              'Content-Length': Buffer.byteLength(body)
+                                                  }
+                                        };
+
+                                        const req = https.request(options, (res) => {
+                                                  const chunks = [];
+                                                  res.on('data', chunk => chunks.push(chunk));
+                                                  res.on('end', () => resolve(Buffer.concat(chunks)));
+                                        });
+
+                                        req.on('error', reject);
+                       req.write(body);
+                       req.end();
+               });
+         }
+
+         async function generateAndSendResponse(userText) {
+               try {
+                       conversationHistory.push({ role: 'user', content: userText });
+
+                 const messages = [
+                   { role: 'system', content: SYSTEM_PROMPT },
+                           ...conversationHistory
+                         ];
+
+                 const responseText = await callGroq(messages);
+                       console.log('Sofia responde:', responseText);
+
+                 conversationHistory.push({ role: 'assistant', content: responseText });
+
+                 const audioBuffer = await textToSpeech(responseText);
+                       const base64Audio = audioBuffer.toString('base64');
+
+                 if (ws.readyState === WebSocket.OPEN && streamSid) {
+                           ws.send(JSON.stringify({
+                                       event: 'media',
+                                       streamSid: streamSid,
+                                       media: { payload: base64Audio }
+                           }));
+                 }
+               } catch (error) {
+                       console.error('Error generando respuesta:', error.message);
+               }
+         }
+
+         ws.on('message', (message) => {
+               try {
+                       const data = JSON.parse(message);
+
+                 if (data.event === 'start') {
+                           streamSid = data.start.streamSid;
+                           console.log('Stream iniciado:', streamSid);
+                           dgSocket = connectDeepgramSTT();
+
+                         setTimeout(async () => {
+                                     try {
+                                                   const greetAudio = await textToSpeech('Hola, buenos dias. Le habla Sofia de una inmobiliaria. Nos interesa su propiedad en Santa Fe. Podria decirme el precio que solicita?');
+                                                   const base64Audio = greetAudio.toString('base64');
+                                                   if (ws.readyState === WebSocket.OPEN && streamSid) {
+                                                                   ws.send(JSON.stringify({
+                                                                                     event: 'media',
+                                                                                     streamSid: streamSid,
+                                                                                     media: { payload: base64Audio }
+                                                                   }));
+                                                   }
+                                     } catch (e) {
+                                                   console.error('Error saludo:', e.message);
+                                     }
+                         }, 1000);
+                 }
+
+                 if (data.event === 'media' && dgSocket && dgSocket.readyState === WebSocket.OPEN) {
+                           const audioData = Buffer.from(data.media.payload, 'base64');
+                           dgSocket.send(audioData);
+                 }
+
+                 if (data.event === 'stop') {
+                           console.log('Llamada terminada');
+                           if (dgSocket) dgSocket.close();
+                 }
+               } catch (e) {
+                       console.error('Error mensaje:', e.message);
+               }
+         });
+
+         ws.on('close', () => {
+               console.log('WebSocket cerrado');
+               if (dgSocket) dgSocket.close();
+         });
 });
 
-server.listen(PORT, () => console.log('Servidor en puerto', PORT));
+server.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
