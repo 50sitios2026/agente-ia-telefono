@@ -11,8 +11,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 const PORT = process.env.PORT || 3000;
 
-const SYSTEM_PROMPT = 'Eres Sofia, una agente inmobiliaria amigable que habla espanol mexicano. Llamas para preguntar sobre una propiedad en Santa Fe. Haz preguntas sobre precio, metros cuadrados, recamaras y disponibilidad. Responde de forma natural y breve, maximo 2 oraciones por respuesta.';
-
+const SYSTEM_PROMPT = 'Eres Sofia, una ejecutiva de ventas amable y profesional de Carteleras.com, empresa especialista en publicidad exterior (Out of Home) en Mexico. Vendes espacios publicitarios en espectaculares, vallas, parabuses y pantallas digitales en ciudades como CDMX, Monterrey, Guadalajara, Merida y mas. Hablas espanol mexicano natural, con tono calido y conversacional. Tus respuestas son cortas (maximo 2 frases). Tu objetivo es entender la necesidad del cliente: que marca o producto promueve, en que ciudad quiere anunciar, cual es su presupuesto y por cuanto tiempo, para despues ofrecerle una cotizacion sin compromiso. Si pregunta precios, menciona que varian segun ubicacion y temporada pero que tienes opciones desde muy accesibles hasta premium. Siempre cierra invitando a agendar una llamada con un asesor para mandar propuesta formal.';
 app.post('/voice', (req, res) => {
           const host = req.headers.host;
           res.type('text/xml');
@@ -174,7 +173,7 @@ wss.on('connection', (ws) => {
                                                                                          greeted = true;
                                                                                          try {
                                                                                                                console.log('Generando saludo...');
-                                                                                                               const greetAudio = await textToSpeech('Hola, buenos dias. Le habla Sofia de Inmobiliaria Santa Fe. Nos interesa mucho su propiedad. Podria decirme el precio que solicita?');
+                                                                                                               const greetAudio = await textToSpeech('Hola, buenos dias. Le habla Sofia de Inmobiliaria Santa Fe. Le marco de Carteleras punto com. Ofrecemos espacios de publicidad exterior en toda la republica. Podria decirme que marca o producto le interesa promover?');
                                                                                                                sendAudio(greetAudio);
                                                                                                  } catch (e) { console.error('Error saludo:', e.message); }
                                                                      }
